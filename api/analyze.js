@@ -1,5 +1,4 @@
 export default async function handler(req, res) {
-  // CORS â€” allow your deployed frontend to call this
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -10,69 +9,142 @@ export default async function handler(req, res) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'Server misconfigured: API key not set' });
 
+  const { ticker } = req.body;
+  if (!ticker) return res.status(400).json({ error: 'Missing ticker' });
+
+  const clean = ticker.toUpperCase().replace(/[^A-Z0-9.\-]/g, '');
+
+  // 1. Fetch market data server-side (no CORS proxy needed)
+  let marketData;
   try {
-    const { ticker, currentPrice, companyName, exchange } = req.body;
-    if (!ticker) return res.status(400).json({ error: 'Missing ticker' });
+    marketData = await fetchYahooData(clean);
+  } catch (err) {
+    return res.status(502).json({ error: `Market data failed: ${err.message}` });
+  }
 
-    const systemPrompt = `You are a senior equity research analyst. Return ONLY valid JSON â€” no markdown, no preamble, no explanation outside the JSON structure. Be concise but substantive. Use real knowledge about the company.`;
+  // 2. Fetch AI analysis
+  try {
+    const aiData = await fetchAIAnalysis(clean, marketData, apiKey);
+    return res.status(200).json({ marketData, aiData });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'AI analysis failed' });
+  }
+}
 
-    const userPrompt = `Analyze ${ticker} (${companyName || ticker}) at current price $${currentPrice?.toFixed?.(2) ?? currentPrice}.
+async function fetchYahooData(ticker) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=1y&interval=1d&includePrePost=false`;
 
-Return this exact JSON structure (fill every field with real, accurate data):
+  let resp = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; InvestorIQ/1.0)',
+      'Accept': 'application/json',
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+
+  // Fallback to query2
+  if (!resp.ok) {
+    resp = await fetch(url.replace('query1', 'query2'), {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; InvestorIQ/1.0)', 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) throw new Error(`Yahoo Finance returned ${resp.status}`);
+  }
+
+  return parseYahooResponse(await resp.json(), ticker);
+}
+
+function parseYahooResponse(raw, ticker) {
+  if (raw.chart?.error || !raw.chart?.result?.[0]) {
+    throw new Error(`Ticker "${ticker}" not found. Check the symbol.`);
+  }
+
+  const result     = raw.chart.result[0];
+  const meta       = result.meta;
+  const timestamps = result.timestamp                     || [];
+  const closes     = result.indicators?.quote?.[0]?.close || [];
+
+  function getClosestPrice(daysAgo) {
+    const targetTs = Date.now() / 1000 - daysAgo * 86400;
+    let closest = null, minDiff = Infinity;
+    for (let i = 0; i < timestamps.length; i++) {
+      if (closes[i] == null) continue;
+      const diff = Math.abs(timestamps[i] - targetTs);
+      if (diff < minDiff) { minDiff = diff; closest = closes[i]; }
+    }
+    return closest;
+  }
+
+  return {
+    ticker,
+    companyName:      meta.longName || meta.shortName || ticker,
+    exchange:         meta.exchangeName || '',
+    currency:         meta.currency || 'USD',
+    currentPrice:     meta.regularMarketPrice,
+    previousClose:    meta.chartPreviousClose || getClosestPrice(2),
+    price1d:          getClosestPrice(2),
+    price1m:          getClosestPrice(30),
+    price1y:          getClosestPrice(365),
+    fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh,
+    fiftyTwoWeekLow:  meta.fiftyTwoWeekLow,
+  };
+}
+
+async function fetchAIAnalysis(ticker, marketData, apiKey) {
+  const { companyName, exchange, currentPrice } = marketData;
+
+  const systemPrompt = `You are a senior equity research analyst. Return ONLY valid JSON â€” no markdown, no preamble, no text outside the JSON object. Use real, accurate knowledge about the company.`;
+
+  const userPrompt = `Analyze ${ticker} (${companyName}) at current price $${currentPrice?.toFixed(2)}.
+
+Return exactly this JSON (all fields required):
 {
   "companyName": "Full legal company name",
-  "sector": "Sector name",
+  "sector": "Sector",
   "industry": "Sub-industry",
-  "exchange": "${exchange || 'NASDAQ'}",
+  "exchange": "${exchange}",
   "marketCap": "e.g. $2.8T",
-  "description": "2-sentence company description",
 
   "dcf": {
     "intrinsicValue": 000.00,
-    "currentPrice": ${currentPrice},
-    "upside": 0.0,
+    "currentPrice": ${currentPrice?.toFixed(2)},
     "verdict": "undervalued|overvalued|fair",
     "verdictLabel": "e.g. Undervalued by 18%",
     "wacc": "e.g. 9.2%",
     "terminalGrowthRate": "e.g. 3.0%",
     "projectedFCFGrowth": "e.g. 12% over 5yr",
-    "explanation": "3-sentence plain-English explanation of how DCF works and what it means for this specific company right now"
+    "explanation": "3-sentence plain-English DCF explanation specific to this company"
   },
 
   "metrics": {
-    "pe": { "value": "00.0x", "good": true, "note": "vs industry avg ~25x" },
-    "roic": { "value": "00.0%", "good": true, "note": "benchmark: >15% is excellent" },
-    "eps": { "value": "$00.00", "good": true, "note": "TTM EPS" },
-    "fcf": { "value": "$00B", "good": true, "note": "trailing 12 months" },
-    "evEbitda": { "value": "00.0x", "good": true, "note": "vs sector avg" },
-    "debtToEquity": { "value": "0.00", "good": true, "note": "leverage note" }
+    "pe":           { "value": "00.0x", "good": true,  "note": "context vs peers" },
+    "roic":         { "value": "00.0%", "good": true,  "note": "context" },
+    "eps":          { "value": "$0.00", "good": true,  "note": "TTM" },
+    "fcf":          { "value": "$00B",  "good": true,  "note": "trailing 12 months" },
+    "evEbitda":     { "value": "00.0x", "good": true,  "note": "vs sector avg" },
+    "debtToEquity": { "value": "0.00",  "good": true,  "note": "leverage note" }
   },
 
-  "peersComparison": "2-3 sentences comparing these metrics to 2-3 named direct competitors with their actual metric values",
+  "peersComparison": "2-3 sentences comparing metrics to 2-3 named competitors with actual values",
 
   "news": [
-    { "type": "company", "title": "Specific recent news headline", "summary": "1-sentence summary of significance", "date": "recent" },
-    { "type": "company", "title": "Specific recent news headline", "summary": "1-sentence summary", "date": "recent" },
-    { "type": "macro", "title": "Macro/industry headline affecting this company", "summary": "1-sentence impact explanation", "date": "recent" },
-    { "type": "macro", "title": "Another macro/industry headline", "summary": "1-sentence impact", "date": "recent" },
-    { "type": "company", "title": "Specific recent news headline", "summary": "1-sentence summary", "date": "recent" }
+    { "type": "company", "title": "Specific headline", "summary": "1-sentence significance" },
+    { "type": "company", "title": "Specific headline", "summary": "1-sentence significance" },
+    { "type": "macro",   "title": "Industry/macro headline", "summary": "1-sentence impact on company" },
+    { "type": "macro",   "title": "Industry/macro headline", "summary": "1-sentence impact" },
+    { "type": "company", "title": "Specific headline", "summary": "1-sentence significance" }
   ],
 
   "contracts": [
-    { "name": "Partner or Customer name", "type": "Partnership|Contract|Deal|Acquisition", "description": "2-sentence description of the deal scope and its strategic/financial significance" },
-    { "name": "Partner or Customer name", "type": "Partnership|Contract|Deal|Acquisition", "description": "2-sentence description" },
-    { "name": "Partner or Customer name", "type": "Partnership|Contract|Deal|Acquisition", "description": "2-sentence description" }
+    { "name": "Partner name", "type": "Partnership|Contract|Deal", "description": "2-sentence description and strategic significance" },
+    { "name": "Partner name", "type": "Partnership|Contract|Deal", "description": "2-sentence description" },
+    { "name": "Partner name", "type": "Partnership|Contract|Deal", "description": "2-sentence description" }
   ],
 
   "moat": {
-    "advantages": [
-      "Advantage 1 with a brief explanation of why it matters",
-      "Advantage 2 with brief explanation",
-      "Advantage 3 with brief explanation",
-      "Advantage 4 with brief explanation"
-    ],
-    "summary": "2-sentence overall competitive positioning and moat durability summary",
-    "moatType": "e.g. Network Effects + Cost Advantages + Intangibles"
+    "advantages": ["Advantage 1 with explanation", "Advantage 2", "Advantage 3", "Advantage 4"],
+    "summary": "2-sentence competitive positioning summary",
+    "moatType": "e.g. Network Effects + Cost Advantages"
   },
 
   "projections": {
@@ -81,49 +153,42 @@ Return this exact JSON structure (fill every field with real, accurate data):
     "bearTarget": "$000",
     "timeframe": "12 months",
     "bullishScore": 72,
-    "keyRisks": ["Specific risk 1", "Specific risk 2", "Specific risk 3"],
-    "keyTailwinds": ["Specific tailwind 1", "Specific tailwind 2", "Specific tailwind 3"],
-    "summary": "3-sentence forward-looking synthesis covering growth catalysts, key risks, and overall conviction"
+    "keyRisks":     ["Risk 1", "Risk 2", "Risk 3"],
+    "keyTailwinds": ["Tailwind 1", "Tailwind 2", "Tailwind 3"],
+    "summary": "3-sentence forward-looking synthesis"
   }
 }`;
 
-    const anthropicResp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2000,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }]
-      })
-    });
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1800,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    }),
+    signal: AbortSignal.timeout(50000),
+  });
 
-    if (!anthropicResp.ok) {
-      const errData = await anthropicResp.json().catch(() => ({}));
-      return res.status(anthropicResp.status).json({ error: errData.error?.message || 'Anthropic API error' });
-    }
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Anthropic API error ${resp.status}`);
+  }
 
-    const anthropicData = await anthropicResp.json();
-    const text = anthropicData.content?.map(b => b.text || '').join('') || '';
-    const clean = text.replace(/```json|```/g, '').trim();
+  const data  = await resp.json();
+  const text  = data.content?.map(b => b.text || '').join('') || '';
+  const clean = text.replace(/```json|```/g, '').trim();
 
-    let parsed;
-    try {
-      parsed = JSON.parse(clean);
-    } catch {
-      const match = clean.match(/\{[\s\S]*\}/);
-      if (match) parsed = JSON.parse(match[0]);
-      else return res.status(500).json({ error: 'AI returned unparseable response. Please retry.' });
-    }
-
-    return res.status(200).json(parsed);
-
-  } catch (err) {
-    console.error('Proxy error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
+  try {
+    return JSON.parse(clean);
+  } catch {
+    const match = clean.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error('AI returned unparseable response â€” please retry.');
   }
 }
