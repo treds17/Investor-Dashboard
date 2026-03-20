@@ -31,6 +31,9 @@ export default async function handler(req, res) {
   }
 }
 
+// ─────────────────────────────────────────────────────────
+// YAHOO FINANCE (server-side — no CORS issues)
+// ─────────────────────────────────────────────────────────
 async function fetchYahooData(ticker) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=1y&interval=1d&includePrePost=false`;
 
@@ -90,61 +93,86 @@ function parseYahooResponse(raw, ticker) {
   };
 }
 
+// ─────────────────────────────────────────────────────────
+// AI ANALYSIS
+// ─────────────────────────────────────────────────────────
 async function fetchAIAnalysis(ticker, marketData, apiKey) {
-  const { companyName, exchange, currentPrice } = marketData;
+  const companyName  = marketData.companyName  || ticker;
+  const exchange     = marketData.exchange     || 'NASDAQ';
+  const currentPrice = typeof marketData.currentPrice === 'number'
+    ? marketData.currentPrice.toFixed(2)
+    : 'unknown';
 
-  const systemPrompt = `You are a senior equity research analyst. Return ONLY valid JSON â€” no markdown, no preamble, no text outside the JSON object. Use real, accurate knowledge about the company.`;
+  const systemPrompt = `You are a senior equity research analyst. Return ONLY a valid JSON object. No markdown fences, no explanation, no text before or after the JSON. Every string value must be properly quoted. Numbers must be plain numbers with no extra characters.`;
 
-  const userPrompt = `Analyze ${ticker} (${companyName}) at current price $${currentPrice?.toFixed(2)}.
+  // NOTE: No dynamic values are injected inside the JSON template below.
+  // All context is given in plain English ABOVE the template to avoid
+  // accidentally producing malformed JSON (e.g. undefined, NaN, null).
+  const userPrompt = `Analyze the following stock:
+- Ticker: ${ticker}
+- Company: ${companyName}
+- Exchange: ${exchange}
+- Current market price: $${currentPrice}
 
-Return exactly this JSON (all fields required):
+Using the current price above, fill in ALL fields in the JSON template below with real, accurate data.
+For the dcf.currentPrice and dcf.intrinsicValue fields use plain numbers (e.g. 213.45), no dollar signs.
+For dcf.upside use a plain number representing percentage (e.g. 18.5 means 18.5% upside).
+For projections.bullishScore use an integer between 0 and 100.
+
+Return exactly this JSON structure and nothing else:
 {
   "companyName": "Full legal company name",
-  "sector": "Sector",
-  "industry": "Sub-industry",
-  "exchange": "${exchange}",
-  "marketCap": "e.g. $2.8T",
+  "sector": "Sector name",
+  "industry": "Sub-industry name",
+  "exchange": "Exchange name",
+  "marketCap": "Human readable e.g. $2.8T or $450B",
 
   "dcf": {
-    "intrinsicValue": 000.00,
-    "currentPrice": ${currentPrice?.toFixed(2)},
-    "verdict": "undervalued|overvalued|fair",
-    "verdictLabel": "e.g. Undervalued by 18%",
-    "wacc": "e.g. 9.2%",
-    "terminalGrowthRate": "e.g. 3.0%",
-    "projectedFCFGrowth": "e.g. 12% over 5yr",
-    "explanation": "3-sentence plain-English DCF explanation specific to this company"
+    "intrinsicValue": 0,
+    "currentPrice": 0,
+    "upside": 0,
+    "verdict": "undervalued",
+    "verdictLabel": "Undervalued by X%",
+    "wacc": "9.2%",
+    "terminalGrowthRate": "3.0%",
+    "projectedFCFGrowth": "12% over 5yr",
+    "explanation": "Three sentence plain-English explanation of DCF specific to this company."
   },
 
   "metrics": {
-    "pe":           { "value": "00.0x", "good": true,  "note": "context vs peers" },
-    "roic":         { "value": "00.0%", "good": true,  "note": "context" },
-    "eps":          { "value": "$0.00", "good": true,  "note": "TTM" },
-    "fcf":          { "value": "$00B",  "good": true,  "note": "trailing 12 months" },
-    "evEbitda":     { "value": "00.0x", "good": true,  "note": "vs sector avg" },
-    "debtToEquity": { "value": "0.00",  "good": true,  "note": "leverage note" }
+    "pe":           { "value": "28.5x", "good": true,  "note": "vs industry avg ~25x" },
+    "roic":         { "value": "32.1%", "good": true,  "note": "well above 15% benchmark" },
+    "eps":          { "value": "$6.42", "good": true,  "note": "TTM earnings per share" },
+    "fcf":          { "value": "$95B",  "good": true,  "note": "trailing 12 months" },
+    "evEbitda":     { "value": "22.3x", "good": true,  "note": "vs sector avg 18x" },
+    "debtToEquity": { "value": "1.73",  "good": false, "note": "elevated but manageable" }
   },
 
-  "peersComparison": "2-3 sentences comparing metrics to 2-3 named competitors with actual values",
+  "peersComparison": "Two to three sentences comparing these metrics to two or three named competitors with their actual metric values.",
 
   "news": [
-    { "type": "company", "title": "Specific headline", "summary": "1-sentence significance" },
-    { "type": "company", "title": "Specific headline", "summary": "1-sentence significance" },
-    { "type": "macro",   "title": "Industry/macro headline", "summary": "1-sentence impact on company" },
-    { "type": "macro",   "title": "Industry/macro headline", "summary": "1-sentence impact" },
-    { "type": "company", "title": "Specific headline", "summary": "1-sentence significance" }
+    { "type": "company", "title": "Specific recent headline about the company", "summary": "One sentence explaining its significance." },
+    { "type": "company", "title": "Another specific recent headline", "summary": "One sentence summary." },
+    { "type": "macro",   "title": "Macro or industry headline affecting this company", "summary": "One sentence on the impact." },
+    { "type": "macro",   "title": "Another macro or industry headline", "summary": "One sentence on the impact." },
+    { "type": "company", "title": "Third specific company headline", "summary": "One sentence summary." }
   ],
 
   "contracts": [
-    { "name": "Partner name", "type": "Partnership|Contract|Deal", "description": "2-sentence description and strategic significance" },
-    { "name": "Partner name", "type": "Partnership|Contract|Deal", "description": "2-sentence description" },
-    { "name": "Partner name", "type": "Partnership|Contract|Deal", "description": "2-sentence description" }
+    { "name": "Partner or customer name", "type": "Partnership", "description": "Two sentences on the deal scope and strategic significance." },
+    { "name": "Partner or customer name", "type": "Contract",    "description": "Two sentences on the deal scope and significance." },
+    { "name": "Partner or customer name", "type": "Deal",        "description": "Two sentences on the deal scope and significance." }
   ],
 
   "moat": {
-    "advantages": ["Advantage 1 with explanation", "Advantage 2", "Advantage 3", "Advantage 4"],
-    "summary": "2-sentence competitive positioning summary",
-    "moatType": "e.g. Network Effects + Cost Advantages"
+    "advantages": [
+      "First advantage with a brief explanation of why it matters",
+      "Second advantage with brief explanation",
+      "Third advantage with brief explanation",
+      "Fourth advantage with brief explanation"
+    ],
+    "summary": "Two sentence competitive positioning and moat durability summary.",
+    "moatType": "e.g. Network Effects + Cost Advantages + Intangibles"
   },
 
   "projections": {
@@ -152,10 +180,10 @@ Return exactly this JSON (all fields required):
     "baseTarget": "$000",
     "bearTarget": "$000",
     "timeframe": "12 months",
-    "bullishScore": 72,
-    "keyRisks":     ["Risk 1", "Risk 2", "Risk 3"],
-    "keyTailwinds": ["Tailwind 1", "Tailwind 2", "Tailwind 3"],
-    "summary": "3-sentence forward-looking synthesis"
+    "bullishScore": 70,
+    "keyRisks":     ["Specific risk one", "Specific risk two", "Specific risk three"],
+    "keyTailwinds": ["Specific tailwind one", "Specific tailwind two", "Specific tailwind three"],
+    "summary": "Three sentence forward-looking synthesis covering growth catalysts, key risks, and overall conviction."
   }
 }`;
 
@@ -180,15 +208,25 @@ Return exactly this JSON (all fields required):
     throw new Error(err.error?.message || `Anthropic API error ${resp.status}`);
   }
 
-  const data  = await resp.json();
-  const text  = data.content?.map(b => b.text || '').join('') || '';
-  const clean = text.replace(/```json|```/g, '').trim();
+  const data = await resp.json();
+  const text = data.content?.map(b => b.text || '').join('') || '';
 
+  // Strip any accidental markdown fences
+  const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+
+  // Attempt parse
   try {
     return JSON.parse(clean);
   } catch {
+    // Try extracting the outermost JSON object
     const match = clean.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error('AI returned unparseable response â€” please retry.');
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch (e2) {
+        throw new Error(`AI returned malformed JSON: ${e2.message}. Please retry.`);
+      }
+    }
+    throw new Error('AI returned unparseable response. Please retry.');
   }
 }
