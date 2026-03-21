@@ -14,7 +14,6 @@ export default async function handler(req, res) {
 
   const clean = ticker.toUpperCase().replace(/[^A-Z0-9.\-]/g, '');
 
-  // 1. Fetch market data server-side (no CORS proxy needed)
   let marketData;
   try {
     marketData = await fetchYahooData(clean);
@@ -22,7 +21,6 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: `Market data failed: ${err.message}` });
   }
 
-  // 2. Fetch AI analysis
   try {
     const aiData = await fetchAIAnalysis(clean, marketData, apiKey);
     return res.status(200).json({ marketData, aiData });
@@ -32,20 +30,16 @@ export default async function handler(req, res) {
 }
 
 // ─────────────────────────────────────────────────────────
-// YAHOO FINANCE (server-side — no CORS issues)
+// YAHOO FINANCE
 // ─────────────────────────────────────────────────────────
 async function fetchYahooData(ticker) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=1y&interval=1d&includePrePost=false`;
 
   let resp = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; InvestorIQ/1.0)',
-      'Accept': 'application/json',
-    },
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; InvestorIQ/1.0)', 'Accept': 'application/json' },
     signal: AbortSignal.timeout(10000),
   });
 
-  // Fallback to query2
   if (!resp.ok) {
     resp = await fetch(url.replace('query1', 'query2'), {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; InvestorIQ/1.0)', 'Accept': 'application/json' },
@@ -61,10 +55,9 @@ function parseYahooResponse(raw, ticker) {
   if (raw.chart?.error || !raw.chart?.result?.[0]) {
     throw new Error(`Ticker "${ticker}" not found. Check the symbol.`);
   }
-
   const result     = raw.chart.result[0];
   const meta       = result.meta;
-  const timestamps = result.timestamp                     || [];
+  const timestamps = result.timestamp || [];
   const closes     = result.indicators?.quote?.[0]?.close || [];
 
   function getClosestPrice(daysAgo) {
@@ -97,114 +90,84 @@ function parseYahooResponse(raw, ticker) {
 // AI ANALYSIS
 // ─────────────────────────────────────────────────────────
 async function fetchAIAnalysis(ticker, marketData, apiKey) {
-  const companyName  = marketData.companyName  || ticker;
-  const exchange     = marketData.exchange     || 'NASDAQ';
+  const companyName  = marketData.companyName || ticker;
+  const exchange     = marketData.exchange || 'NASDAQ';
   const currentPrice = typeof marketData.currentPrice === 'number'
-    ? marketData.currentPrice.toFixed(2)
-    : 'unknown';
+    ? marketData.currentPrice.toFixed(2) : 'unknown';
 
-  const systemPrompt = `You are a senior equity research analyst. Return ONLY a valid JSON object. No markdown fences, no explanation, no text before or after the JSON. Every string value must be properly quoted. Numbers must be plain numbers with no extra characters.`;
+  // Plain-English schema description — no JSON template to corrupt
+  const systemPrompt = `You are a senior equity research analyst. You must respond with ONLY a valid JSON object and absolutely nothing else — no markdown, no code fences, no explanation, no text before or after the JSON. Produce clean, properly escaped JSON with all strings quoted and all arrays/objects properly closed.`;
 
-  // NOTE: No dynamic values are injected inside the JSON template below.
-  // All context is given in plain English ABOVE the template to avoid
-  // accidentally producing malformed JSON (e.g. undefined, NaN, null).
-  const userPrompt = `Analyze the following stock:
+  const userPrompt = `Analyze this stock and return a JSON object with the exact keys described below.
+
+STOCK INFO:
 - Ticker: ${ticker}
 - Company: ${companyName}
 - Exchange: ${exchange}
-- Current market price: $${currentPrice}
+- Current price: $${currentPrice}
 
-Using the current price above, fill in ALL fields in the JSON template below with real, accurate data.
-For the dcf.currentPrice and dcf.intrinsicValue fields use plain numbers (e.g. 213.45), no dollar signs.
-For dcf.upside use a plain number representing percentage (e.g. 18.5 means 18.5% upside).
-For projections.bullishScore use an integer between 0 and 100.
-For competitors.threatLevel use an integer 0-100 representing how much of a competitive threat they pose.
-For moat.vsCompetitors.advantage use only the strings: "ahead", "behind", or "parity".
-List 5 contracts if possible (skip any you cannot recall, minimum 3).
-List 3-5 competitors.
+REQUIRED JSON KEYS AND TYPES — produce ALL of them:
 
-Return exactly this JSON structure and nothing else:
-{
-  "companyName": "Full legal company name",
-  "sector": "Sector name",
-  "industry": "Sub-industry name",
-  "exchange": "Exchange name",
-  "marketCap": "Human readable e.g. $2.8T or $450B",
+companyName: string
+sector: string
+industry: string
+exchange: string
+marketCap: string (e.g. "$2.8T")
 
-  "dcf": {
-    "intrinsicValue": 0,
-    "currentPrice": 0,
-    "upside": 0,
-    "verdict": "undervalued",
-    "verdictLabel": "Undervalued by X%",
-    "wacc": "9.2%",
-    "terminalGrowthRate": "3.0%",
-    "projectedFCFGrowth": "12% over 5yr",
-    "explanation": "Three sentence plain-English explanation of DCF specific to this company."
-  },
+dcf: object with keys:
+  intrinsicValue: number (no $ sign, e.g. 213.45)
+  currentPrice: number (use ${currentPrice})
+  upside: number (percentage, e.g. 18.5)
+  verdict: string, one of: "undervalued" "overvalued" "fair"
+  verdictLabel: string (e.g. "Undervalued by 18%")
+  wacc: string (e.g. "9.2%")
+  terminalGrowthRate: string (e.g. "3.0%")
+  projectedFCFGrowth: string (e.g. "12% over 5yr")
+  explanation: string (3 sentences about DCF for this specific company)
 
-  "metrics": {
-    "pe":           { "value": "28.5x", "good": true,  "note": "vs industry avg ~25x" },
-    "roic":         { "value": "32.1%", "good": true,  "note": "well above 15% benchmark" },
-    "eps":          { "value": "$6.42", "good": true,  "note": "TTM earnings per share" },
-    "fcf":          { "value": "$95B",  "good": true,  "note": "trailing 12 months" },
-    "evEbitda":     { "value": "22.3x", "good": true,  "note": "vs sector avg 18x" },
-    "debtToEquity": { "value": "1.73",  "good": false, "note": "elevated but manageable" }
-  },
+metrics: object with keys pe, roic, eps, fcf, evEbitda, debtToEquity.
+  Each has: value (string), good (boolean), note (string)
 
-  "peersComparison": "Two to three sentences comparing these metrics to two or three named competitors with their actual metric values.",
+peersComparison: string (2-3 sentences comparing metrics to named competitors with actual values)
 
-  "news": [
-    { "type": "company", "title": "Specific recent headline", "summary": "One sentence significance.", "source": "e.g. Bloomberg", "sourceUrl": "https://..." },
-    { "type": "company", "title": "Specific recent headline", "summary": "One sentence summary.", "source": "e.g. Reuters", "sourceUrl": "https://..." },
-    { "type": "macro",   "title": "Macro or industry headline", "summary": "One sentence impact.", "source": "e.g. WSJ", "sourceUrl": "https://..." },
-    { "type": "macro",   "title": "Another macro headline", "summary": "One sentence impact.", "source": "e.g. FT", "sourceUrl": "https://..." },
-    { "type": "company", "title": "Third company headline", "summary": "One sentence summary.", "source": "e.g. CNBC", "sourceUrl": "https://..." }
-  ],
+news: array of exactly 5 objects, each with:
+  type: string, either "company" or "macro"
+  title: string (specific real headline)
+  summary: string (1 sentence)
+  source: string (publication name e.g. "Bloomberg")
+  sourceUrl: string (homepage URL of that publication e.g. "https://bloomberg.com")
 
-  "contracts": [
-    { "name": "Partner or customer name", "type": "Partnership", "description": "Two sentences on the deal scope and strategic significance." },
-    { "name": "Partner or customer name", "type": "Contract",    "description": "Two sentences on the deal scope and significance." },
-    { "name": "Partner or customer name", "type": "Deal",        "description": "Two sentences on the deal scope and significance." },
-    { "name": "Partner or customer name", "type": "Partnership", "description": "Two sentences on the deal scope and significance." },
-    { "name": "Partner or customer name", "type": "Contract",    "description": "Two sentences on the deal scope and significance." }
-  ],
+contracts: array of 5 objects, each with:
+  name: string (partner/customer name)
+  type: string (e.g. "Partnership" "Contract" "Deal")
+  description: string (2 sentences on scope and strategic significance)
 
-  "competitors": [
-    { "name": "Competitor full name", "ticker": "TICK", "description": "Two sentences on what they do and why they compete.", "threatLevel": 75 },
-    { "name": "Competitor full name", "ticker": "TICK", "description": "Two sentences on what they do and why they compete.", "threatLevel": 60 },
-    { "name": "Competitor full name", "ticker": "TICK", "description": "Two sentences on what they do and why they compete.", "threatLevel": 50 },
-    { "name": "Competitor full name", "ticker": "TICK", "description": "Two sentences on what they do and why they compete.", "threatLevel": 45 }
-  ],
+competitors: array of 4 objects, each with:
+  name: string (full company name)
+  ticker: string (stock ticker)
+  description: string (2 sentences on what they do and why they compete)
+  threatLevel: integer 0-100 (competitive threat score)
 
-  "moat": {
-    "advantages": [
-      "First advantage with a brief explanation of why it matters",
-      "Second advantage with brief explanation",
-      "Third advantage with brief explanation",
-      "Fourth advantage with brief explanation"
-    ],
-    "summary": "Two sentence competitive positioning and moat durability summary.",
-    "moatType": "e.g. Network Effects + Cost Advantages + Intangibles",
-    "vsCompetitors": [
-      { "dimension": "e.g. AI & Cloud Infrastructure", "advantage": "ahead", "detail": "One to two sentences on how this company leads competitors in this area and why it matters." },
-      { "dimension": "e.g. Hardware Ecosystem", "advantage": "ahead", "detail": "One to two sentences comparing position vs competitors." },
-      { "dimension": "e.g. Services & Margins", "advantage": "parity", "detail": "One to two sentences on where they are roughly even with rivals." },
-      { "dimension": "e.g. Enterprise Sales", "advantage": "behind", "detail": "One to two sentences on where competitors currently lead and why." }
-    ]
-  },
+moat: object with keys:
+  advantages: array of 4 strings (each is one advantage with brief explanation)
+  summary: string (2 sentences on competitive positioning)
+  moatType: string (e.g. "Network Effects + Cost Advantages")
+  vsCompetitors: array of 4 objects, each with:
+    dimension: string (competitive dimension e.g. "Cloud Infrastructure")
+    advantage: string, one of: "ahead" "behind" "parity"
+    detail: string (2 sentences comparing this company vs competitors on this dimension)
 
-  "projections": {
-    "bullTarget": "$000",
-    "baseTarget": "$000",
-    "bearTarget": "$000",
-    "timeframe": "12 months",
-    "bullishScore": 70,
-    "keyRisks":     ["Specific risk one", "Specific risk two", "Specific risk three"],
-    "keyTailwinds": ["Specific tailwind one", "Specific tailwind two", "Specific tailwind three"],
-    "summary": "Three sentence forward-looking synthesis covering growth catalysts, key risks, and overall conviction."
-  }
-}`;
+projections: object with keys:
+  bullTarget: string (e.g. "$245")
+  baseTarget: string (e.g. "$210")
+  bearTarget: string (e.g. "$165")
+  timeframe: string ("12 months")
+  bullishScore: integer 0-100
+  keyRisks: array of 3 strings
+  keyTailwinds: array of 3 strings
+  summary: string (3 sentences forward-looking synthesis)
+
+Respond with ONLY the JSON object. No other text.`;
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -214,12 +177,12 @@ Return exactly this JSON structure and nothing else:
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1800,
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2800,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     }),
-    signal: AbortSignal.timeout(50000),
+    signal: AbortSignal.timeout(55000),
   });
 
   if (!resp.ok) {
@@ -231,14 +194,16 @@ Return exactly this JSON structure and nothing else:
   const text = data.content?.map(b => b.text || '').join('') || '';
 
   // Strip any accidental markdown fences
-  const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  const cleaned = text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
 
-  // Attempt parse
   try {
-    return JSON.parse(clean);
+    return JSON.parse(cleaned);
   } catch {
-    // Try extracting the outermost JSON object
-    const match = clean.match(/\{[\s\S]*\}/);
+    const match = cleaned.match(/\{[\s\S]*\}/);
     if (match) {
       try {
         return JSON.parse(match[0]);
