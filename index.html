@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>InvestorIQ — Stock Intelligence Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg: #07090f;
@@ -20,6 +20,7 @@
     --text: #e8edf5;
     --text2: #8899aa;
     --text3: #4d6070;
+    --display: 'Syne', sans-serif;
     --mono: 'Space Mono', monospace;
     --sans: 'DM Sans', sans-serif;
     --radius: 10px;
@@ -49,7 +50,7 @@
     background: rgba(7,9,15,0.92);
     backdrop-filter: blur(12px);
   }
-  .logo { font-family: var(--mono); font-size: 18px; color: var(--accent); letter-spacing: -0.5px; }
+  .logo { font-family: var(--display); font-size: 20px; color: var(--accent); letter-spacing: -0.5px; font-weight: 800; }
   .logo span { color: var(--text2); }
   .header-right { display: flex; gap: 12px; align-items: center; }
   .cache-badge {
@@ -63,8 +64,8 @@
     padding: 0 24px; text-align: center;
   }
   .hero h1 {
-    font-family: var(--mono); font-size: clamp(28px,4vw,44px);
-    font-weight: 700; letter-spacing: -1px; line-height: 1.15; margin-bottom: 12px;
+    font-family: var(--display); font-size: clamp(32px,4vw,52px);
+    font-weight: 800; letter-spacing: -2px; line-height: 1.1; margin-bottom: 12px;
   }
   .hero h1 em { color: var(--accent); font-style: normal; }
   .hero p { color: var(--text2); font-size: 15px; margin-bottom: 32px; line-height: 1.6; }
@@ -149,7 +150,7 @@
     background: linear-gradient(90deg, var(--accent), var(--accent2), transparent);
   }
   .ticker-name { font-family: var(--mono); font-size: 13px; color: var(--text2); margin-bottom: 4px; }
-  .ticker-company { font-size: 26px; font-weight: 600; margin-bottom: 8px; }
+  .ticker-company { font-family: var(--display); font-size: 26px; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.5px; }
   .ticker-meta { display: flex; gap: 10px; flex-wrap: wrap; }
   .meta-chip {
     font-size: 12px; color: var(--text2); background: var(--surface2);
@@ -232,6 +233,13 @@
   .tag-macro   { background: rgba(240,192,64,0.1);  color: var(--accent); }
   .news-title { font-size: 13px; font-weight: 500; color: var(--text); line-height: 1.5; }
   .news-meta  { font-size: 11px; color: var(--text3); margin-top: 4px; font-family: var(--mono); }
+  .news-source-wrap { margin-top: 8px; }
+  .news-source {
+    font-family: var(--mono); font-size: 11px; color: var(--accent2);
+    text-decoration: none; border-bottom: 1px solid rgba(59,130,246,0.3);
+    padding-bottom: 1px; transition: color 0.15s, border-color 0.15s;
+  }
+  .news-source:hover { color: #60a5fa; border-color: #60a5fa; }
 
   /* AI prose */
   .ai-section { font-size: 14px; color: var(--text2); line-height: 1.75; }
@@ -354,7 +362,6 @@
     </div>
     <div class="price-block">
       <div class="price-current" id="d-price">$—</div>
-      <div class="price-change neutral" id="d-change">—</div>
       <div class="cache-note" id="d-cache-note"></div>
     </div>
   </div>
@@ -557,15 +564,6 @@ function renderDashboard(data, fromCache) {
   document.getElementById('d-market-cap').textContent = 'Mkt Cap: ' + (ai.marketCap || '—');
   document.getElementById('d-price').textContent    = '$' + (md.currentPrice?.toFixed(2) ?? '—');
 
-  const prevClose = md.previousClose || md.price1d;
-  if (prevClose && md.currentPrice) {
-    const chg = md.currentPrice - prevClose;
-    const pct = (chg / prevClose) * 100;
-    const el  = document.getElementById('d-change');
-    el.className = 'price-change ' + (chg >= 0 ? 'up' : 'down');
-    el.textContent = `${chg >= 0 ? '+' : ''}$${chg.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%) today`;
-  }
-
   document.getElementById('d-cache-note').textContent = fromCache
     ? `⚡ from cache · ${new Date(data.fetchedAt).toLocaleString()}`
     : `⬤ live · ${new Date().toLocaleString()}`;
@@ -666,14 +664,20 @@ function renderMetrics(metrics, peersText) {
 // ── News ──
 function renderNews(news) {
   document.getElementById('news-list').innerHTML = news.length
-    ? news.map(n => `
+    ? news.map(n => {
+        const sourceHtml = n.source
+          ? `<a href="${n.sourceUrl || '#'}" target="_blank" rel="noopener" class="news-source">${n.source} ↗</a>`
+          : (n.sourceUrl ? `<a href="${n.sourceUrl}" target="_blank" rel="noopener" class="news-source">Read more ↗</a>` : '');
+        return `
         <div class="news-item">
           <span class="news-tag tag-${n.type}">${n.type === 'company' ? 'Company' : 'Macro'}</span>
           <div>
             <div class="news-title">${n.title}</div>
             <div class="news-meta">${n.summary}</div>
+            ${sourceHtml ? `<div class="news-source-wrap">${sourceHtml}</div>` : ''}
           </div>
-        </div>`).join('')
+        </div>`;
+      }).join('')
     : '<p style="color:var(--text3)">No news data.</p>';
 }
 
