@@ -151,11 +151,11 @@ Return exactly this JSON structure and nothing else:
   "peersComparison": "Two to three sentences comparing these metrics to two or three named competitors with their actual metric values.",
 
   "news": [
-    { "type": "company", "title": "Specific recent headline about the company", "summary": "One sentence explaining its significance." },
-    { "type": "company", "title": "Another specific recent headline", "summary": "One sentence summary." },
-    { "type": "macro",   "title": "Macro or industry headline affecting this company", "summary": "One sentence on the impact." },
-    { "type": "macro",   "title": "Another macro or industry headline", "summary": "One sentence on the impact." },
-    { "type": "company", "title": "Third specific company headline", "summary": "One sentence summary." }
+    { "type": "company", "title": "Specific recent headline", "summary": "One sentence significance.", "source": "e.g. Bloomberg", "sourceUrl": "https://..." },
+    { "type": "company", "title": "Specific recent headline", "summary": "One sentence summary.", "source": "e.g. Reuters", "sourceUrl": "https://..." },
+    { "type": "macro",   "title": "Macro or industry headline", "summary": "One sentence impact.", "source": "e.g. WSJ", "sourceUrl": "https://..." },
+    { "type": "macro",   "title": "Another macro headline", "summary": "One sentence impact.", "source": "e.g. FT", "sourceUrl": "https://..." },
+    { "type": "company", "title": "Third company headline", "summary": "One sentence summary.", "source": "e.g. CNBC", "sourceUrl": "https://..." }
   ],
 
   "contracts": [
