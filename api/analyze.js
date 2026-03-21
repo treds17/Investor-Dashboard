@@ -22,25 +22,38 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: `Market data failed: ${err.message}` });
   }
 
-  // 2. Two parallel Haiku calls with individual retry + partial fallback
+  // 2. Two parallel calls, each with up to 3 attempts
   const [quantResult, qualResult] = await Promise.all([
-    withRetry(() => fetchQuantAnalysis(clean, marketData, apiKey)),
-    withRetry(() => fetchQualAnalysis(clean, marketData, apiKey)),
+    withRetry(() => fetchQuantAnalysis(clean, marketData, apiKey), 3),
+    withRetry(() => fetchQualAnalysis(clean, marketData, apiKey), 3),
   ]);
 
-  // If BOTH failed, return an error
+  // Both failed → hard error
   if (!quantResult.ok && !qualResult.ok) {
     return res.status(500).json({
-      error: `Analysis failed: ${quantResult.error}. Please retry.`,
+      error: `Analysis failed on both calls: ${quantResult.error}. Please retry.`,
     });
   }
 
-  // Merge — use empty fallbacks for whichever half failed
+  const quantData = quantResult.ok ? quantResult.data : QUANT_FALLBACK;
+  const qualData  = qualResult.ok  ? qualResult.data  : QUAL_FALLBACK;
+
+  // Validate that critical arrays/objects actually exist in the response.
+  // If a required key is missing, mark it as a partial failure so the
+  // frontend knows to show a warning — but still return what we have.
+  const missing = [];
+  if (!quantData.competitors?.length)  missing.push('competitors');
+  if (!quantData.metrics)              missing.push('metrics');
+  if (!quantData.dcf)                  missing.push('DCF');
+  if (!qualData.news?.length)          missing.push('news');
+  if (!qualData.contracts?.length)     missing.push('contracts');
+  if (!qualData.moat)                  missing.push('moat');
+
   const aiData = {
-    ...(quantResult.ok  ? quantResult.data  : QUANT_FALLBACK),
-    ...(qualResult.ok   ? qualResult.data   : QUAL_FALLBACK),
-    _partialFailure: (!quantResult.ok || !qualResult.ok)
-      ? `Some sections unavailable (${!quantResult.ok ? 'financial data' : 'news/moat'}). Retry to reload.`
+    ...quantData,
+    ...qualData,
+    _partialFailure: missing.length
+      ? `Some sections could not load: ${missing.join(', ')}. Try searching again.`
       : null,
   };
 
@@ -48,37 +61,39 @@ export default async function handler(req, res) {
 }
 
 // ─────────────────────────────────────────────────────────
-// RETRY WRAPPER — attempts fn up to 2 times, returns {ok, data, error}
+// RETRY — up to `attempts` tries with exponential backoff
+// Returns { ok: true, data } or { ok: false, error }
 // ─────────────────────────────────────────────────────────
-async function withRetry(fn, attempts = 2) {
+async function withRetry(fn, attempts = 3) {
+  let lastError;
   for (let i = 0; i < attempts; i++) {
     try {
       const data = await fn();
+      // Sanity check — if we got back an empty object, treat as failure
+      if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {
+        throw new Error('Empty response from AI');
+      }
       return { ok: true, data };
     } catch (err) {
-      if (i === attempts - 1) return { ok: false, error: err.message };
-      // Small pause before retry
-      await new Promise(r => setTimeout(r, 800));
+      lastError = err;
+      if (i < attempts - 1) {
+        // Exponential backoff: 600ms, 1200ms
+        await new Promise(r => setTimeout(r, 600 * (i + 1)));
+      }
     }
   }
+  return { ok: false, error: lastError?.message || 'Unknown error' };
 }
 
 // ─────────────────────────────────────────────────────────
-// FALLBACKS — shown when one call fails but the other succeeds
+// FALLBACKS — used when a call fails all retries
 // ─────────────────────────────────────────────────────────
 const QUANT_FALLBACK = {
   companyName: '', sector: '—', industry: '—', exchange: '—', marketCap: '—',
-  dcf: null,
-  metrics: null,
-  peersComparison: '',
-  competitors: [],
-  projections: null,
+  dcf: null, metrics: null, peersComparison: '', competitors: [], projections: null,
 };
-
 const QUAL_FALLBACK = {
-  news: [],
-  contracts: [],
-  moat: null,
+  news: [], contracts: [], moat: null,
 };
 
 // ─────────────────────────────────────────────────────────
@@ -136,7 +151,7 @@ function parseYahooResponse(raw, ticker) {
 }
 
 // ─────────────────────────────────────────────────────────
-// HAIKU HELPER
+// HAIKU HELPER — parses and validates JSON response
 // ─────────────────────────────────────────────────────────
 async function callHaiku(apiKey, systemPrompt, userPrompt, maxTokens) {
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -162,18 +177,62 @@ async function callHaiku(apiKey, systemPrompt, userPrompt, maxTokens) {
 
   const data    = await resp.json();
   const text    = data.content?.map(b => b.text || '').join('') || '';
-  const cleaned = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  const cleaned = text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
 
+  // Try direct parse first
   try {
-    return JSON.parse(cleaned);
+    const parsed = JSON.parse(cleaned);
+    return parsed;
   } catch {
+    // Try to salvage by extracting the outermost { ... }
     const match = cleaned.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error('AI returned unparseable JSON. Please retry.');
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+        // Last resort: try to fix common truncation issues
+        // (unclosed array/object at end of token limit)
+        const salvaged = attemptSalvage(match[0]);
+        if (salvaged) return salvaged;
+      }
+    }
+    throw new Error('Could not parse AI response as JSON');
   }
 }
 
-const SYS = `You are a senior equity research analyst. Respond with ONLY a valid JSON object. No markdown, no code fences, no explanation — just the raw JSON.`;
+// Attempts to close any unclosed brackets/braces caused by token cutoff
+function attemptSalvage(text) {
+  try {
+    let fixed = text.trimEnd();
+    // Remove trailing incomplete string/value
+    fixed = fixed.replace(/,\s*$/, '');
+    fixed = fixed.replace(/"[^"]*$/, '"—"');
+    // Count unclosed braces and brackets
+    let braces = 0, brackets = 0;
+    let inString = false;
+    for (let i = 0; i < fixed.length; i++) {
+      const c = fixed[i];
+      if (c === '"' && fixed[i - 1] !== '\\') inString = !inString;
+      if (inString) continue;
+      if (c === '{') braces++;
+      if (c === '}') braces--;
+      if (c === '[') brackets++;
+      if (c === ']') brackets--;
+    }
+    // Close any open brackets then braces
+    fixed += ']'.repeat(Math.max(0, brackets));
+    fixed += '}'.repeat(Math.max(0, braces));
+    return JSON.parse(fixed);
+  } catch {
+    return null;
+  }
+}
+
+const SYS = `You are a senior equity research analyst. Respond with ONLY a valid JSON object. No markdown, no code fences, no explanation — just the raw JSON. Ensure all strings are properly quoted and all arrays and objects are fully closed.`;
 
 // ─────────────────────────────────────────────────────────
 // CALL 1 — QUANT: DCF, Metrics, Competitors, Projections
@@ -201,9 +260,9 @@ peersComparison: string, 2 sentences comparing metrics to named competitors
 
 competitors: array of 4 objects each with name (string), ticker (string), description (string, 1 sentence), threatLevel (integer 0-100)
 
-projections: object with bullTarget (string e.g. "$245"), baseTarget (string), bearTarget (string), timeframe ("12 months"), bullishScore (integer 0-100), keyRisks (array of 3 strings), keyTailwinds (array of 3 strings), summary (string, 2 sentences)`;
+projections: object with bullTarget (string e.g. "$245"), baseTarget (string), bearTarget (string), timeframe ("12 months"), bullishScore (integer 0-100), keyRisks (array of 3 strings), keyTailwinds (array of 3 strings), summary (string, 1 sentence)`;
 
-  return callHaiku(apiKey, SYS, prompt, 1400);
+  return callHaiku(apiKey, SYS, prompt, 1300);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -216,11 +275,11 @@ async function fetchQualAnalysis(ticker, marketData, apiKey) {
 
 Return a JSON object with these exact keys:
 
-news: array of 5 objects each with type (string: "company" or "macro"), title (string, specific headline), summary (string, 1 sentence), source (string, publication name), sourceUrl (string, publication homepage URL)
+news: array of 5 objects each with type (string: "company" or "macro"), title (string, specific headline), summary (string, brief — under 15 words), source (string, publication name), sourceUrl (string, publication homepage URL)
 
-contracts: array of 5 objects each with name (string, partner name), type (string e.g. "Partnership"), description (string, 2 sentences on scope and significance)
+contracts: array of 5 objects each with name (string, partner name), type (string e.g. "Partnership"), description (string, 1 concise sentence on scope and significance)
 
-moat: object with advantages (array of 4 strings, each one advantage with brief reason), summary (string, 2 sentences), moatType (string e.g. "Network Effects + Cost Advantages"), vsCompetitors (array of 4 objects each with dimension (string, competitive area), advantage (string: "ahead" or "behind" or "parity"), detail (string, 1-2 sentences comparing this company vs rivals))`;
+moat: object with advantages (array of 4 strings, each under 12 words), summary (string, 1 sentence), moatType (string e.g. "Network Effects + Cost Advantages"), vsCompetitors (array of 4 objects each with dimension (string, competitive area), advantage (string: "ahead" or "behind" or "parity"), detail (string, 1 sentence comparing this company vs rivals))`;
 
-  return callHaiku(apiKey, SYS, prompt, 1400);
+  return callHaiku(apiKey, SYS, prompt, 1300);
 }
