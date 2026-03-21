@@ -118,6 +118,10 @@ Using the current price above, fill in ALL fields in the JSON template below wit
 For the dcf.currentPrice and dcf.intrinsicValue fields use plain numbers (e.g. 213.45), no dollar signs.
 For dcf.upside use a plain number representing percentage (e.g. 18.5 means 18.5% upside).
 For projections.bullishScore use an integer between 0 and 100.
+For competitors.threatLevel use an integer 0-100 representing how much of a competitive threat they pose.
+For moat.vsCompetitors.advantage use only the strings: "ahead", "behind", or "parity".
+List 5 contracts if possible (skip any you cannot recall, minimum 3).
+List 3-5 competitors.
 
 Return exactly this JSON structure and nothing else:
 {
@@ -161,7 +165,16 @@ Return exactly this JSON structure and nothing else:
   "contracts": [
     { "name": "Partner or customer name", "type": "Partnership", "description": "Two sentences on the deal scope and strategic significance." },
     { "name": "Partner or customer name", "type": "Contract",    "description": "Two sentences on the deal scope and significance." },
-    { "name": "Partner or customer name", "type": "Deal",        "description": "Two sentences on the deal scope and significance." }
+    { "name": "Partner or customer name", "type": "Deal",        "description": "Two sentences on the deal scope and significance." },
+    { "name": "Partner or customer name", "type": "Partnership", "description": "Two sentences on the deal scope and significance." },
+    { "name": "Partner or customer name", "type": "Contract",    "description": "Two sentences on the deal scope and significance." }
+  ],
+
+  "competitors": [
+    { "name": "Competitor full name", "ticker": "TICK", "description": "Two sentences on what they do and why they compete.", "threatLevel": 75 },
+    { "name": "Competitor full name", "ticker": "TICK", "description": "Two sentences on what they do and why they compete.", "threatLevel": 60 },
+    { "name": "Competitor full name", "ticker": "TICK", "description": "Two sentences on what they do and why they compete.", "threatLevel": 50 },
+    { "name": "Competitor full name", "ticker": "TICK", "description": "Two sentences on what they do and why they compete.", "threatLevel": 45 }
   ],
 
   "moat": {
@@ -172,7 +185,13 @@ Return exactly this JSON structure and nothing else:
       "Fourth advantage with brief explanation"
     ],
     "summary": "Two sentence competitive positioning and moat durability summary.",
-    "moatType": "e.g. Network Effects + Cost Advantages + Intangibles"
+    "moatType": "e.g. Network Effects + Cost Advantages + Intangibles",
+    "vsCompetitors": [
+      { "dimension": "e.g. AI & Cloud Infrastructure", "advantage": "ahead", "detail": "One to two sentences on how this company leads competitors in this area and why it matters." },
+      { "dimension": "e.g. Hardware Ecosystem", "advantage": "ahead", "detail": "One to two sentences comparing position vs competitors." },
+      { "dimension": "e.g. Services & Margins", "advantage": "parity", "detail": "One to two sentences on where they are roughly even with rivals." },
+      { "dimension": "e.g. Enterprise Sales", "advantage": "behind", "detail": "One to two sentences on where competitors currently lead and why." }
+    ]
   },
 
   "projections": {
