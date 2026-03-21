@@ -369,6 +369,9 @@
 
 <!-- DASHBOARD -->
 <div id="dashboard">
+  <!-- Partial failure banner -->
+  <div id="partial-failure-banner" style="display:none;background:rgba(240,192,64,0.08);border:1px solid rgba(240,192,64,0.2);border-radius:8px;padding:10px 16px;font-size:13px;color:var(--accent);font-family:var(--mono);margin-bottom:16px;"></div>
+
   <!-- Ticker header -->
   <div class="ticker-header">
     <div>
@@ -601,6 +604,15 @@ function renderDashboard(data, fromCache) {
 
   document.getElementById('dashboard').classList.add('visible');
   document.getElementById('dashboard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // Show partial failure warning if one AI call failed but the other succeeded
+  const partialBanner = document.getElementById('partial-failure-banner');
+  if (ai._partialFailure) {
+    partialBanner.textContent = '⚠ ' + ai._partialFailure;
+    partialBanner.style.display = 'block';
+  } else {
+    partialBanner.style.display = 'none';
+  }
 
   renderPriceTable(md);
   renderDCF(ai.dcf);
